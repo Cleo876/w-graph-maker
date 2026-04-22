@@ -1,0 +1,560 @@
+import React, { useState, useRef, useEffect } from 'react';
+import { MousePointer2, RefreshCw, Trash2, Image as ImageIcon, Info, PencilLine, Download, Hand, ZoomIn, ZoomOut, Locate, Settings } from 'lucide-react';
+
+// Helper to generate guaranteed unique IDs
+const generateId = (prefix) => `${prefix}-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`;
+
+export default function App() {
+  const [nodes, setNodes] = useState([]);
+  const [edges, setEdges] = useState([]);
+  const [mode, setMode] = useState('draw'); // 'draw', 'loopback', 'move', 'delete', 'pan'
+  
+  // Customization State for Node & Edge Sizes
+  const [nodeRadius, setNodeRadius] = useState(15);
+  const [edgeWidth, setEdgeWidth] = useState(3);
+  
+  // Background & Zoom State
+  const [bgImage, setBgImage] = useState('');
+  const [bgDimensions, setBgDimensions] = useState({ width: 0, height: 0 });
+  const [view, setView] = useState({ x: 0, y: 0, scale: 1 });
+  
+  const [tempEdge, setTempEdge] = useState(null);
+
+  // Synchronous Refs
+  const nodesRef = useRef([]);
+  const edgesRef = useRef([]);
+  const drawState = useRef({ active: false, startNode: null });
+  const moveState = useRef({ draggingNodeId: null });
+  const panState = useRef({ isPanning: false, startX: 0, startY: 0 });
+
+  const svgRef = useRef(null);
+
+  // Sync state to refs
+  useEffect(() => { nodesRef.current = nodes; }, [nodes]);
+  useEffect(() => { edgesRef.current = edges; }, [edges]);
+
+  // Helper: Find first available alphabetical label
+  const getNextAvailableLabel = (currentNodes) => {
+    let index = 0;
+    while (true) {
+      let label = '';
+      let temp = index;
+      while (temp >= 0) {
+        label = String.fromCharCode(65 + (temp % 26)) + label;
+        temp = Math.floor(temp / 26) - 1;
+      }
+      if (!currentNodes.some(n => n.label === label)) return label;
+      index++;
+    }
+  };
+
+  // Upload and convert image to base64 so it can be exported correctly with the SVG
+  const handleImageUpload = (e) => {
+    const file = e.target.files[0];
+    if (file) {
+      const reader = new FileReader();
+      reader.onload = (event) => {
+        const dataUrl = event.target.result;
+        const img = new Image();
+        img.onload = () => {
+          setBgDimensions({ width: img.width, height: img.height });
+          setBgImage(dataUrl);
+          // Auto-center the newly uploaded image
+          const svg = svgRef.current;
+          if (svg) {
+            setView({
+              x: (svg.clientWidth - img.width) / 2,
+              y: (svg.clientHeight - img.height) / 2,
+              scale: 1
+            });
+          }
+        };
+        img.src = dataUrl;
+      };
+      reader.readAsDataURL(file);
+    }
+  };
+
+  // Convert Viewport coordinates (Mouse) to Logical Map coordinates
+  const getLogicalCoords = (clientX, clientY) => {
+    const rect = svgRef.current.getBoundingClientRect();
+    const mouseXViewport = clientX - rect.left;
+    const mouseYViewport = clientY - rect.top;
+    return {
+      x: (mouseXViewport - view.x) / view.scale,
+      y: (mouseYViewport - view.y) / view.scale
+    };
+  };
+
+  // --- MOUSE EVENTS ---
+  const handleMouseDown = (e) => {
+    if (mode === 'pan') {
+      panState.current = { isPanning: true, startX: e.clientX - view.x, startY: e.clientY - view.y };
+      return;
+    }
+
+    const { x, y } = getLogicalCoords(e.clientX, e.clientY);
+    const clickedNode = nodesRef.current.find(n => Math.hypot(n.x - x, n.y - y) <= nodeRadius + 10);
+
+    if (mode === 'draw') {
+      if (clickedNode) {
+        drawState.current = { active: true, startNode: clickedNode };
+        setTempEdge({ x, y });
+      } else {
+        const label = getNextAvailableLabel(nodesRef.current);
+        const newNode = { id: generateId('node'), x, y, label };
+        const newNodes = [...nodesRef.current, newNode];
+        setNodes(newNodes);
+        nodesRef.current = newNodes; 
+        
+        drawState.current = { active: true, startNode: newNode };
+        setTempEdge({ x, y });
+      }
+    } 
+    else if (mode === 'loopback' && clickedNode) {
+      const edgeExists = edgesRef.current.some(edge => edge.source === clickedNode.id && edge.target === clickedNode.id);
+      if (!edgeExists) {
+        const newEdges = [...edgesRef.current, { id: generateId('edge'), source: clickedNode.id, target: clickedNode.id, weight: '' }];
+        setEdges(newEdges);
+        edgesRef.current = newEdges;
+      }
+    }
+    else if (mode === 'move' && clickedNode) {
+      moveState.current.draggingNodeId = clickedNode.id;
+    }
+    else if (mode === 'delete' && clickedNode) {
+      const newNodes = nodesRef.current.filter(n => n.id !== clickedNode.id);
+      const newEdges = edgesRef.current.filter(edge => edge.source !== clickedNode.id && edge.target !== clickedNode.id);
+      setNodes(newNodes);
+      setEdges(newEdges);
+    }
+  };
+
+  const handleMouseMove = (e) => {
+    if (mode === 'pan' && panState.current.isPanning) {
+      setView(prev => ({ ...prev, x: e.clientX - panState.current.startX, y: e.clientY - panState.current.startY }));
+      return;
+    }
+
+    const { x, y } = getLogicalCoords(e.clientX, e.clientY);
+
+    if (mode === 'draw' && drawState.current.active) {
+      setTempEdge({ x, y });
+    } 
+    else if (mode === 'move' && moveState.current.draggingNodeId) {
+      const id = moveState.current.draggingNodeId;
+      const newNodes = nodesRef.current.map(n => n.id === id ? { ...n, x, y } : n);
+      setNodes(newNodes);
+      nodesRef.current = newNodes;
+    }
+  };
+
+  const handleMouseUp = (e) => {
+    if (mode === 'pan') {
+      panState.current.isPanning = false;
+      return;
+    }
+
+    if (mode === 'draw' && drawState.current.active) {
+      const { x, y } = getLogicalCoords(e.clientX, e.clientY);
+      const targetNode = nodesRef.current.find(n => Math.hypot(n.x - x, n.y - y) <= nodeRadius + 10);
+      const startNode = drawState.current.startNode;
+
+      if (targetNode && targetNode.id !== startNode.id) {
+        const edgeExists = edgesRef.current.some(edge => edge.source === startNode.id && edge.target === targetNode.id);
+        if (!edgeExists) {
+          const newEdges = [...edgesRef.current, { id: generateId('edge'), source: startNode.id, target: targetNode.id, weight: '' }];
+          setEdges(newEdges);
+          edgesRef.current = newEdges;
+        }
+      } else if (!targetNode) {
+        const label = getNextAvailableLabel(nodesRef.current);
+        const newNode = { id: generateId('node'), x, y, label };
+        const newNodes = [...nodesRef.current, newNode];
+        setNodes(newNodes);
+        nodesRef.current = newNodes;
+        
+        const newEdges = [...edgesRef.current, { id: generateId('edge'), source: startNode.id, target: newNode.id, weight: '' }];
+        setEdges(newEdges);
+        edgesRef.current = newEdges;
+      }
+      
+      drawState.current = { active: false, startNode: null };
+      setTempEdge(null);
+    }
+    else if (mode === 'move') {
+      moveState.current.draggingNodeId = null;
+    }
+  };
+
+  // --- ZOOM / WHEEL EVENT ---
+  const handleWheel = (e) => {
+    // Determine scroll direction (allow zooming out incredibly far or zooming in very close)
+    const scaleAdjust = e.deltaY > 0 ? 0.9 : 1.1; 
+    
+    setView(prev => {
+      const newScale = Math.min(Math.max(0.05, prev.scale * scaleAdjust), 10); // Clamped between 5% and 1000% zoom
+      const rect = svgRef.current.getBoundingClientRect();
+      const mouseX = e.clientX - rect.left;
+      const mouseY = e.clientY - rect.top;
+
+      // Pinpoint exact spot mouse is hovering over in logical space
+      const logicalX = (mouseX - prev.x) / prev.scale;
+      const logicalY = (mouseY - prev.y) / prev.scale;
+
+      return {
+        scale: newScale,
+        x: mouseX - logicalX * newScale,
+        y: mouseY - logicalY * newScale
+      };
+    });
+  };
+
+  const handleZoomIn = () => setView(v => ({ ...v, scale: Math.min(v.scale * 1.2, 10) }));
+  const handleZoomOut = () => setView(v => ({ ...v, scale: Math.max(v.scale * 0.8, 0.05) }));
+  const handleResetView = () => setView({ x: 0, y: 0, scale: 1 });
+
+  // --- INTERACTION HELPERS ---
+  const handleEdgeClick = (e, edgeId) => {
+    if (mode === 'delete') {
+      e.stopPropagation();
+      setEdges(edgesRef.current.filter(edge => edge.id !== edgeId));
+    }
+  };
+
+  const handleDoubleClick = (e, type, item) => {
+    e.stopPropagation();
+    const isNode = type === 'node';
+    const currentVal = isNode ? item.label : item.weight;
+    const newVal = prompt(`Edit ${isNode ? 'Vertex Letter/Name' : 'Edge Weight'}:`, currentVal || '');
+    
+    if (newVal !== null) {
+      if (isNode) {
+        setNodes(nodesRef.current.map(n => n.id === item.id ? { ...n, label: newVal } : n));
+      } else {
+        setEdges(edgesRef.current.map(edge => edge.id === item.id ? { ...edge, weight: newVal } : edge));
+      }
+    }
+  };
+
+  // --- WYSIWYG EXPORT HELPER ---
+  const exportImage = (withBackground) => {
+    const svg = svgRef.current;
+    if (!svg) return;
+
+    // Clone the SVG so we can manipulate it for a clean export without affecting the live UI
+    const clone = svg.cloneNode(true);
+    
+    if (!withBackground) {
+      const bgImg = clone.querySelector('#bg-image');
+      if (bgImg) bgImg.remove();
+      const bgGrid = clone.querySelector('#bg-grid-rect');
+      if (bgGrid) bgGrid.remove();
+    }
+
+    const svgData = new XMLSerializer().serializeToString(clone);
+    const svgBlob = new Blob([svgData], { type: 'image/svg+xml;charset=utf-8' });
+    const DOMURL = window.URL || window.webkitURL || window;
+    const url = DOMURL.createObjectURL(svgBlob);
+    
+    const img = new Image();
+    img.onload = () => {
+      const canvas = document.createElement('canvas');
+      canvas.width = svg.clientWidth;
+      canvas.height = svg.clientHeight;
+      const ctx = canvas.getContext('2d');
+      
+      // Draw solid background based on selection
+      ctx.fillStyle = withBackground && !bgImage ? '#cbd5e1' : '#ffffff';
+      ctx.fillRect(0, 0, canvas.width, canvas.height);
+      
+      // Draw Framed SVG over it
+      ctx.drawImage(img, 0, 0);
+      DOMURL.revokeObjectURL(url);
+      
+      const a = document.createElement('a');
+      a.href = canvas.toDataURL('image/png');
+      a.download = withBackground ? 'framed-graph-with-map.png' : 'framed-graph.png';
+      a.click();
+    };
+    img.src = url;
+  };
+
+  // --- RENDER HELPERS ---
+  const getEdgeData = (sourceNode, targetNode, isBidirectional) => {
+    if (sourceNode.id === targetNode.id) {
+      // LOOPBACK PATH - Dynamically scales with nodeRadius
+      const x = sourceNode.x;
+      const y = sourceNode.y;
+      const startX = x - (nodeRadius * 0.35);
+      const startY = y - nodeRadius + 2;
+      const endX = x + (nodeRadius * 0.35);
+      const endY = y - nodeRadius + 2;
+      
+      const cpX = Math.max(40, nodeRadius * 2.5);
+      const cpY = Math.max(60, nodeRadius * 4);
+      
+      const pathD = `M ${startX} ${startY} C ${x - cpX} ${y - cpY}, ${x + cpX} ${y - cpY}, ${endX} ${endY}`;
+      return { pathD, textX: x, textY: y - Math.max(70, nodeRadius * 4.5) };
+    } 
+
+    // STRAIGHT/CURVED DIRECTED PATH
+    const dx = targetNode.x - sourceNode.x;
+    const dy = targetNode.y - sourceNode.y;
+    const distance = Math.sqrt(dx * dx + dy * dy);
+    
+    if (distance === 0) return { pathD: '', textX: 0, textY: 0 }; 
+
+    const startX = sourceNode.x + (dx / distance) * nodeRadius;
+    const startY = sourceNode.y + (dy / distance) * nodeRadius;
+    const endX = targetNode.x - (dx / distance) * nodeRadius;
+    const endY = targetNode.y - (dy / distance) * nodeRadius;
+
+    if (isBidirectional) {
+      const midX = (startX + endX) / 2;
+      const midY = (startY + endY) / 2;
+      const normalX = -dy / distance;
+      const normalY = dx / distance;
+      const curveOffset = Math.max(30, nodeRadius * 1.8);
+      const curveOffsetX = midX + normalX * curveOffset; 
+      const curveOffsetY = midY + normalY * curveOffset;
+      
+      const pathD = `M ${startX} ${startY} Q ${curveOffsetX} ${curveOffsetY} ${endX} ${endY}`;
+      const textX = 0.25 * startX + 0.5 * curveOffsetX + 0.25 * endX;
+      const textY = 0.25 * startY + 0.5 * curveOffsetY + 0.25 * endY;
+      return { pathD, textX, textY };
+    }
+    
+    const pathD = `M ${startX} ${startY} L ${endX} ${endY}`;
+    return { pathD, textX: (startX + endX) / 2, textY: (startY + endY) / 2 };
+  };
+
+  // Cursor handling based on tool
+  const getCursorClass = () => {
+    if (mode === 'pan') return panState.current.isPanning ? 'cursor-grabbing' : 'cursor-grab';
+    if (mode === 'draw') return 'cursor-crosshair';
+    if (mode === 'move') return moveState.current.draggingNodeId ? 'cursor-grabbing' : 'cursor-grab';
+    return 'cursor-pointer';
+  };
+
+  return (
+    <div className="absolute inset-0 flex bg-slate-100 font-sans text-slate-800 select-none overflow-hidden">
+      
+      {/* Sidebar Controls */}
+      <div className="w-72 bg-white border-r shadow-2xl flex flex-col z-20 shrink-0 overflow-y-auto">
+        <div className="p-4 border-b bg-slate-900 text-white shrink-0">
+          <h1 className="text-lg font-bold tracking-tight">Direct Graph Maker</h1>
+          <p className="text-xs text-slate-400 mt-1">Smart Pan & Zoom Engine</p>
+        </div>
+
+        <div className="p-3 flex flex-col gap-1.5 border-b shrink-0">
+          <h2 className="text-[11px] font-bold text-slate-400 uppercase tracking-wider mb-1">Editing Tools</h2>
+          <ToolButton active={mode === 'pan'} onClick={() => setMode('pan')} icon={<Hand size={16} />} label="Pan View (Drag)" />
+          <ToolButton active={mode === 'draw'} onClick={() => setMode('draw')} icon={<PencilLine size={16} />} label="Draw (Drag & Connect)" />
+          <ToolButton active={mode === 'loopback'} onClick={() => setMode('loopback')} icon={<RefreshCw size={16} />} label="Add Loopback (Click)" />
+          <ToolButton active={mode === 'move'} onClick={() => setMode('move')} icon={<MousePointer2 size={16} />} label="Move Vertexes" />
+          <ToolButton active={mode === 'delete'} onClick={() => setMode('delete')} icon={<Trash2 size={16} />} label="Delete Eraser" danger />
+        </div>
+
+        <div className="p-3 border-b shrink-0">
+          <h2 className="text-[11px] font-bold text-slate-400 uppercase tracking-wider mb-2">Map Layer</h2>
+          <label className="flex items-center justify-center w-full px-3 py-2 bg-indigo-50 text-indigo-700 border border-indigo-200 rounded-md cursor-pointer hover:bg-indigo-100 hover:border-indigo-300 transition-all shadow-sm text-xs font-semibold">
+            <ImageIcon size={16} className="mr-2" />
+            Upload Map Image
+            <input type="file" accept="image/*" className="hidden" onChange={handleImageUpload} />
+          </label>
+        </div>
+
+        <div className="p-3 border-b bg-white shrink-0">
+          <h2 className="text-[11px] font-bold text-slate-400 uppercase tracking-wider mb-2 flex items-center"><Settings size={14} className="mr-1"/> Appearance</h2>
+          <div className="space-y-3">
+            <div>
+              <label className="text-[11px] font-semibold text-slate-600 flex justify-between">
+                Vertex Size <span>{nodeRadius}px</span>
+              </label>
+              <input type="range" min="5" max="60" value={nodeRadius} onChange={(e) => setNodeRadius(Number(e.target.value))} className="w-full mt-1 accent-indigo-600" />
+            </div>
+            <div>
+              <label className="text-[11px] font-semibold text-slate-600 flex justify-between">
+                Arrow Thickness <span>{edgeWidth}px</span>
+              </label>
+              <input type="range" min="1" max="15" value={edgeWidth} onChange={(e) => setEdgeWidth(Number(e.target.value))} className="w-full mt-1 accent-indigo-600" />
+            </div>
+          </div>
+        </div>
+
+        <div className="p-3 border-b bg-slate-50 shrink-0">
+          <h2 className="text-[11px] font-bold text-slate-400 uppercase tracking-wider mb-2">Export Framed Graph</h2>
+          <div className="flex flex-col gap-1.5">
+            <button onClick={() => exportImage(false)} className="flex items-center justify-center w-full px-3 py-2 bg-white text-slate-700 border border-slate-300 rounded-md hover:bg-slate-100 transition-all text-xs font-semibold shadow-sm">
+              <Download size={14} className="mr-2" /> Graph Only (White BG)
+            </button>
+            <button onClick={() => exportImage(true)} className="flex items-center justify-center w-full px-3 py-2 bg-slate-800 text-white border border-slate-900 rounded-md hover:bg-slate-700 transition-all text-xs font-semibold shadow-sm">
+              <Download size={14} className="mr-2" /> Current View & Map
+            </button>
+          </div>
+        </div>
+
+        <div className="p-3 flex-grow bg-slate-50">
+          <div className="bg-white p-3 rounded-md border border-slate-200 shadow-sm">
+            <p className="font-bold text-xs mb-1.5 flex items-center text-slate-700">
+              <Info size={14} className="mr-1.5 text-blue-500"/> Navigation Tips:
+            </p>
+            <ul className="text-[11px] text-slate-600 leading-relaxed list-disc pl-3 space-y-1">
+              <li>Use the <b>Scroll Wheel</b> to Zoom smoothly.</li>
+              <li>Select <b>Pan View</b> to drag around.</li>
+              <li>Exports will capture exactly what is framed!</li>
+            </ul>
+          </div>
+        </div>
+      </div>
+
+      {/* Main Canvas Area */}
+      <div className="flex-grow relative bg-slate-300 overflow-hidden">
+        
+        {/* On-Canvas Zoom Controls */}
+        <div className="absolute bottom-4 right-4 z-30 flex gap-1 bg-white p-1.5 rounded-md shadow-lg border border-slate-200">
+          <button onClick={handleZoomOut} className="p-1.5 hover:bg-slate-100 rounded text-slate-700" title="Zoom Out"><ZoomOut size={16}/></button>
+          <div className="w-px bg-slate-200 my-1 mx-0.5"></div>
+          <button onClick={handleResetView} className="px-2 hover:bg-slate-100 rounded text-slate-700 font-semibold text-[10px] flex items-center gap-1" title="Reset View"><Locate size={14}/> {Math.round(view.scale * 100)}%</button>
+          <div className="w-px bg-slate-200 my-1 mx-0.5"></div>
+          <button onClick={handleZoomIn} className="p-1.5 hover:bg-slate-100 rounded text-slate-700" title="Zoom In"><ZoomIn size={16}/></button>
+        </div>
+
+        {/* Interactive SVG Layer */}
+        <svg 
+          ref={svgRef}
+          xmlns="http://www.w3.org/2000/svg"
+          className={`absolute inset-0 w-full h-full z-10 ${getCursorClass()}`}
+          onMouseDown={handleMouseDown}
+          onMouseMove={handleMouseMove}
+          onMouseUp={handleMouseUp}
+          onMouseLeave={handleMouseUp}
+          onWheel={handleWheel}
+        >
+          <defs>
+            <marker id="arrowhead" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+              <path d="M 0 0 L 10 5 L 0 10 z" fill="#0f172a" />
+            </marker>
+            <marker id="arrowhead-hover" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+              <path d="M 0 0 L 10 5 L 0 10 z" fill="#ef4444" />
+            </marker>
+            <marker id="arrowhead-temp" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+              <path d="M 0 0 L 10 5 L 0 10 z" fill="#64748b" />
+            </marker>
+            
+            {/* Grid Pattern for empty canvas mapping */}
+            <pattern id="grid" width="30" height="30" patternUnits="userSpaceOnUse">
+              <circle cx="15" cy="15" r="1.5" fill="#94a3b8" />
+            </pattern>
+          </defs>
+
+          {/* The Camera / Transform Wrapper */}
+          <g id="canvas-group" transform={`translate(${view.x}, ${view.y}) scale(${view.scale})`}>
+            
+            {/* Infinite Background Engine */}
+            {!bgImage && (
+              <rect id="bg-grid-rect" x="-50000" y="-50000" width="100000" height="100000" fill="url(#grid)" className="pointer-events-none" />
+            )}
+            {bgImage && (
+              <image id="bg-image" href={bgImage} x="0" y="0" width={bgDimensions.width} height={bgDimensions.height} className="pointer-events-none" />
+            )}
+
+            {/* Render Saved Edges */}
+            {edges.map(edge => {
+              const sourceNode = nodes.find(n => n.id === edge.source);
+              const targetNode = nodes.find(n => n.id === edge.target);
+              if (!sourceNode || !targetNode) return null;
+
+              const isBidirectional = edges.some(e => e.source === targetNode.id && e.target === sourceNode.id);
+              const { pathD, textX, textY } = getEdgeData(sourceNode, targetNode, isBidirectional);
+
+              return (
+                <g key={edge.id}>
+                  <path
+                    d={pathD}
+                    fill="none"
+                    stroke="transparent"
+                    strokeWidth={Math.max(15, edgeWidth * 3)}
+                    className={mode === 'delete' || mode === 'pan' ? '' : 'cursor-pointer'}
+                    onClick={(e) => handleEdgeClick(e, edge.id)}
+                    onDoubleClick={(e) => handleDoubleClick(e, 'edge', edge)}
+                  />
+                  <path
+                    d={pathD}
+                    fill="none"
+                    stroke={mode === 'delete' ? '#cbd5e1' : '#0f172a'}
+                    strokeWidth={edgeWidth}
+                    markerEnd={`url(#${mode === 'delete' ? 'arrowhead-hover' : 'arrowhead'})`}
+                    className={`transition-colors duration-200 pointer-events-none ${mode === 'delete' ? 'hover:stroke-red-500' : ''}`}
+                  />
+                  {edge.weight && (
+                    <g className="pointer-events-none">
+                      <text x={textX} y={textY - (edgeWidth + 4)} textAnchor="middle" stroke="white" strokeWidth="4" strokeLinejoin="round" className="font-bold text-sm font-sans">{edge.weight}</text>
+                      <text x={textX} y={textY - (edgeWidth + 4)} textAnchor="middle" className="font-bold text-sm fill-blue-700 font-sans">{edge.weight}</text>
+                    </g>
+                  )}
+                </g>
+              );
+            })}
+
+            {/* Render Temporary Edge */}
+            {mode === 'draw' && tempEdge && drawState.current.startNode && (
+              <path
+                d={`M ${drawState.current.startNode.x} ${drawState.current.startNode.y} L ${tempEdge.x} ${tempEdge.y}`}
+                fill="none"
+                stroke="#64748b"
+                strokeWidth={edgeWidth}
+                strokeDasharray="6,6"
+                markerEnd="url(#arrowhead-temp)"
+                className="pointer-events-none"
+              />
+            )}
+
+            {/* Render Vertexes */}
+            {nodes.map(node => (
+              <g 
+                key={node.id} 
+                transform={`translate(${node.x}, ${node.y})`}
+                onDoubleClick={(e) => handleDoubleClick(e, 'node', node)}
+                className={mode === 'draw' ? 'cursor-text' : ''}
+              >
+                <circle r={nodeRadius + 2} fill="rgba(0,0,0,0.15)" transform="translate(2, 3)" className="pointer-events-none" />
+                <circle 
+                  r={nodeRadius} 
+                  fill={mode === 'delete' ? '#fee2e2' : '#ffffff'} 
+                  stroke={mode === 'delete' ? '#ef4444' : '#0f172a'} 
+                  strokeWidth={Math.max(2, edgeWidth * 0.75)}
+                  className="transition-colors duration-200 pointer-events-none" 
+                />
+                <text 
+                  textAnchor="middle" 
+                  dy=".35em" 
+                  fontSize={Math.max(10, nodeRadius * 0.8)}
+                  className="font-bold fill-slate-900 pointer-events-none font-mono"
+                >
+                  {node.label}
+                </text>
+              </g>
+            ))}
+          </g>
+        </svg>
+      </div>
+    </div>
+  );
+}
+
+function ToolButton({ active, onClick, icon, label, danger }) {
+  const baseClasses = "flex items-center w-full px-3 py-2 rounded-md transition-all text-[11px] font-bold border";
+  const activeClasses = danger 
+    ? "bg-red-50 border-red-200 text-red-700 shadow-inner" 
+    : "bg-indigo-50 border-indigo-200 text-indigo-700 shadow-inner";
+  const inactiveClasses = "bg-white border-transparent text-slate-600 hover:bg-slate-50 hover:border-slate-200";
+
+  return (
+    <button onClick={onClick} className={`${baseClasses} ${active ? activeClasses : inactiveClasses}`}>
+      <span className={`mr-2.5 ${active ? 'opacity-100' : 'opacity-70'}`}>{icon}</span>
+      {label}
+    </button>
+  );
+}
